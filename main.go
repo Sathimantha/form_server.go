@@ -354,49 +354,100 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Debug: Count submissions directly
-	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM submissions WHERE form_id = ?", formID).Scan(&count)
-	if err != nil {
-		http.Error(w, "DB error counting", http.StatusInternalServerError)
-		return
-	}
-
 	var formName string
 	db.QueryRow("SELECT form_name FROM forms WHERE form_id = ?", formID).Scan(&formName)
 
-	html := fmt.Sprintf(`
-		<h1>Debug: Submissions for Form %d (%s)</h1>
-		<p><strong>Total submissions in DB:</strong> %d</p>
-	`, formID, html.EscapeString(formName), count)
-
-	if count == 0 {
-		html += "<p>No submissions found in database for this form.</p>"
-	} else {
-		html += "<p>Found submissions — listing below:</p><hr>"
-	}
-
-	rows, err := db.Query("SELECT submission_id, timestamp, ip_address FROM submissions WHERE form_id = ? ORDER BY timestamp DESC", formID)
+	rows, err := db.Query(`
+		SELECT submission_id, data, files, timestamp, ip_address
+		FROM submissions 
+		WHERE form_id = ? 
+		ORDER BY submission_id DESC
+	`, formID)
 	if err != nil {
-		html += fmt.Sprintf("<p>Query error: %v</p>", err)
-		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(html))
+		logError("ADMIN_DB_ERROR", fmt.Sprintf("Query failed: %v", err))
+		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
+	var subsHTML strings.Builder
+	subsHTML.WriteString(fmt.Sprintf("<h1>Submissions for Form %d: %s</h1><hr>", formID, html.EscapeString(formName)))
+
+	submissionCount := 0
+
 	for rows.Next() {
-		var id int
-		var ts time.Time
+		submissionCount++
+
+		var subID int
+		var dataJSON []byte
+		var filesJSON sql.NullString // Handles NULL properly
+		var timestamp time.Time
 		var ip string
-		rows.Scan(&id, &ts, &ip)
-		html += fmt.Sprintf("<p>✓ Submission ID %d | %s | IP: %s</p>", id, ts, ip)
+
+		if err := rows.Scan(&subID, &dataJSON, &filesJSON, &timestamp, &ip); err != nil {
+			continue
+		}
+
+		// Parse form data
+		var data map[string]string
+		if err := json.Unmarshal(dataJSON, &data); err != nil {
+			data = map[string]string{"_error": "Could not parse form data"}
+		}
+
+		// Parse files
+		var files []string
+		if filesJSON.Valid {
+			json.Unmarshal([]byte(filesJSON.String), &files)
+		}
+
+		// Render data fields
+		dataStr := ""
+		for key, value := range data {
+			dataStr += fmt.Sprintf("<strong>%s:</strong> %s<br>", html.EscapeString(key), html.EscapeString(value))
+		}
+
+		// Render files
+		filesStr := "<em>No files uploaded</em>"
+		if len(files) > 0 {
+			filesStr = ""
+			for _, filePath := range files {
+				relPath, _ := filepath.Rel(uploadsDir, filePath)
+				filename := filepath.Base(filePath)
+				filesStr += fmt.Sprintf(`<a href="/admin/files/%s" download>📎 %s</a><br>`, html.EscapeString(relPath), html.EscapeString(filename))
+			}
+		}
+
+		ts := timestamp.Format("2006-01-02 15:04:05")
+		if timestamp.IsZero() {
+			ts = "Not recorded"
+		}
+
+		subsHTML.WriteString(fmt.Sprintf(`
+			<div style="background:#fff;padding:20px;margin:20px 0;border-left:5px solid #007bff;border-radius:5px;box-shadow:0 2px 5px rgba(0,0,0,0.1);">
+				<h3>Submission #%d</h3>
+				<p><strong>Time:</strong> %s<br>
+				<strong>IP:</strong> %s</p>
+				<h4>Data:</h4>
+				<div style="margin-left:20px;">%s</div>
+				<h4>Files:</h4>
+				<div style="margin-left:20px;">%s</div>
+			</div>
+		`, subID, ts, html.EscapeString(ip), dataStr, filesStr))
 	}
 
-	html += `<br><a href="/admin/">← Back to Forms List</a>`
+	if submissionCount == 0 {
+		subsHTML.WriteString("<p><em>No submissions found.</em></p>")
+	}
+
+	subsHTML.WriteString(`<p><a href="/admin/" style="font-size:18px;color:#007bff;">← Back to Forms</a></p>`)
+
+	finalHTML := fmt.Sprintf(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Submissions - %s</title>
+<style>body{font-family:Arial,sans-serif;background:#f7f7f7;padding:20px;color:#333;}</style>
+</head><body>%s</body></html>`, html.EscapeString(formName), subsHTML.String())
 
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(html))
+	w.Write([]byte(finalHTML))
 }
 
 // serveFileHandler serves files from uploads dir (protected)

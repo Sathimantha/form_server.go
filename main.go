@@ -380,40 +380,39 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 
 		var subID int
 		var dataJSON []byte
-		var filesJSON sql.NullString // Handles NULL properly
+		var filesJSON sql.NullString
 		var timestamp time.Time
 		var ip string
 
 		if err := rows.Scan(&subID, &dataJSON, &filesJSON, &timestamp, &ip); err != nil {
+			subsHTML.WriteString(fmt.Sprintf("<p>Error reading row: %v</p>", err))
 			continue
 		}
 
-		// Parse form data
-		var data map[string]string
-		if err := json.Unmarshal(dataJSON, &data); err != nil {
-			data = map[string]string{"_error": "Could not parse form data"}
+		// Try to parse data JSON - if fails, show raw
+		var data map[string]interface{}
+		dataStr := "<em>Invalid/malformed form data (raw below):</em><br><pre>" + html.EscapeString(string(dataJSON)) + "</pre>"
+		if json.Unmarshal(dataJSON, &data) == nil {
+			dataStr = ""
+			for key, value := range data {
+				valStr := fmt.Sprintf("%v", value)
+				dataStr += fmt.Sprintf("<strong>%s:</strong> %s<br>", html.EscapeString(key), html.EscapeString(valStr))
+			}
 		}
 
-		// Parse files
+		// Files
 		var files []string
 		if filesJSON.Valid {
 			json.Unmarshal([]byte(filesJSON.String), &files)
 		}
 
-		// Render data fields
-		dataStr := ""
-		for key, value := range data {
-			dataStr += fmt.Sprintf("<strong>%s:</strong> %s<br>", html.EscapeString(key), html.EscapeString(value))
-		}
-
-		// Render files
-		filesStr := "<em>No files uploaded</em>"
+		filesStr := "<em>No files</em>"
 		if len(files) > 0 {
 			filesStr = ""
-			for _, filePath := range files {
-				relPath, _ := filepath.Rel(uploadsDir, filePath)
-				filename := filepath.Base(filePath)
-				filesStr += fmt.Sprintf(`<a href="/admin/files/%s" download>📎 %s</a><br>`, html.EscapeString(relPath), html.EscapeString(filename))
+			for _, f := range files {
+				relPath, _ := filepath.Rel(uploadsDir, f)
+				base := filepath.Base(f)
+				filesStr += fmt.Sprintf(`<a href="/admin/files/%s" download>📎 %s</a><br>`, html.EscapeString(relPath), html.EscapeString(base))
 			}
 		}
 
@@ -423,10 +422,9 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		subsHTML.WriteString(fmt.Sprintf(`
-			<div style="background:#fff;padding:20px;margin:20px 0;border-left:5px solid #007bff;border-radius:5px;box-shadow:0 2px 5px rgba(0,0,0,0.1);">
+			<div style="background:#fff;padding:20px;margin:20px 0;border:1px solid #ddd;border-radius:8px;">
 				<h3>Submission #%d</h3>
-				<p><strong>Time:</strong> %s<br>
-				<strong>IP:</strong> %s</p>
+				<p><strong>Time:</strong> %s<br><strong>IP:</strong> %s</p>
 				<h4>Data:</h4>
 				<div style="margin-left:20px;">%s</div>
 				<h4>Files:</h4>
@@ -439,15 +437,12 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 		subsHTML.WriteString("<p><em>No submissions found.</em></p>")
 	}
 
-	subsHTML.WriteString(`<p><a href="/admin/" style="font-size:18px;color:#007bff;">← Back to Forms</a></p>`)
+	subsHTML.WriteString(`<p><a href="/admin/">← Back to Forms List</a></p>`)
 
-	finalHTML := fmt.Sprintf(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Submissions - %s</title>
-<style>body{font-family:Arial,sans-serif;background:#f7f7f7;padding:20px;color:#333;}</style>
-</head><body>%s</body></html>`, html.EscapeString(formName), subsHTML.String())
+	fullHTML := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Submissions</title></head><body style="font-family:Arial;background:#f9f9f9;padding:20px;">%s</body></html>`, subsHTML.String())
 
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(finalHTML))
+	w.Write([]byte(fullHTML))
 }
 
 // serveFileHandler serves files from uploads dir (protected)

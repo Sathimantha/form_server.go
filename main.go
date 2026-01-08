@@ -84,14 +84,20 @@ func main() {
 	r.HandleFunc("/submit", submitHandler).Methods("POST")
 
 	// Admin interface routes (protected)
+	// Admin interface routes (protected)
 	adminRouter := r.PathPrefix("/admin").Subrouter()
 	adminRouter.Use(basicAuthMiddleware)
-	adminRouter.HandleFunc("/", adminHomeHandler).Methods("GET")
+	adminRouter.HandleFunc("/", adminHomeHandler).Methods("GET") // Matches /admin/
 	adminRouter.HandleFunc("/create-form", createFormHandler).Methods("POST")
 	adminRouter.HandleFunc("/forms/{form_id}", viewSubmissionsHandler).Methods("GET")
 
 	// File serving (protected under /admin/files/)
 	adminRouter.HandleFunc("/files/{path:.*}", serveFileHandler).Methods("GET")
+
+	// Add this: Explicit handler for /admin (without trailing slash) - redirects to /admin/
+	r.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
+	}).Methods("GET")
 
 	// CORS configuration: Allow only from *.peaceandhumanity.org
 	corsHandler := handlers.CORS(

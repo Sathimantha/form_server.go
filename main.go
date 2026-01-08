@@ -354,122 +354,49 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Optional: Get form name for better title
-	var formName string
-	err = db.QueryRow("SELECT form_name FROM forms WHERE form_id = ?", formID).Scan(&formName)
+	// Debug: Count submissions directly
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM submissions WHERE form_id = ?", formID).Scan(&count)
 	if err != nil {
-		formName = "Unknown Form"
+		http.Error(w, "DB error counting", http.StatusInternalServerError)
+		return
 	}
 
-	rows, err := db.Query(`
-		SELECT submission_id, data, files, timestamp, ip_address
-		FROM submissions WHERE form_id = ? ORDER BY timestamp DESC
-	`, formID)
+	var formName string
+	db.QueryRow("SELECT form_name FROM forms WHERE form_id = ?", formID).Scan(&formName)
+
+	html := fmt.Sprintf(`
+		<h1>Debug: Submissions for Form %d (%s)</h1>
+		<p><strong>Total submissions in DB:</strong> %d</p>
+	`, formID, html.EscapeString(formName), count)
+
+	if count == 0 {
+		html += "<p>No submissions found in database for this form.</p>"
+	} else {
+		html += "<p>Found submissions — listing below:</p><hr>"
+	}
+
+	rows, err := db.Query("SELECT submission_id, timestamp, ip_address FROM submissions WHERE form_id = ? ORDER BY timestamp DESC", formID)
 	if err != nil {
-		logError("ADMIN_DB_ERROR", fmt.Sprintf("Failed to query submissions: %v", err))
-		http.Error(w, "Internal error", http.StatusInternalServerError)
+		html += fmt.Sprintf("<p>Query error: %v</p>", err)
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(html))
 		return
 	}
 	defer rows.Close()
 
-	var subsHTML strings.Builder
-	subsHTML.WriteString(fmt.Sprintf("<h1>Submissions for Form %d: %s</h1>", formID, html.EscapeString(formName)))
-	subsHTML.WriteString("<ul style=\"list-style: none; padding: 0;\">")
-
-	submissionCount := 0
 	for rows.Next() {
-		submissionCount++
-
-		var subID int
-		var dataJSON, filesJSON []byte
-		var timestamp time.Time
+		var id int
+		var ts time.Time
 		var ip string
-
-		if err := rows.Scan(&subID, &dataJSON, &filesJSON, &timestamp, &ip); err != nil {
-			continue // Skip bad rows
-		}
-
-		// Unmarshal form data
-		var data map[string]interface{}
-		if err := json.Unmarshal(dataJSON, &data); err != nil {
-			data = map[string]interface{}{"raw_data_error": string(dataJSON)}
-		}
-
-		// Unmarshal files
-		var files []string
-		if filesJSON != nil && len(filesJSON) > 0 {
-			if err := json.Unmarshal(filesJSON, &files); err != nil {
-				files = nil
-			}
-		}
-
-		// Render form data
-		dataStr := "<div style=\"margin-left: 20px;\">"
-		for key, value := range data {
-			valStr := fmt.Sprintf("%v", value)
-			dataStr += fmt.Sprintf("<strong>%s:</strong> %s<br>", html.EscapeString(key), html.EscapeString(valStr))
-		}
-		dataStr += "</div>"
-
-		// Render attachments
-		filesStr := ""
-		if len(files) > 0 {
-			filesStr = "<strong>Attachments:</strong><br><div style=\"margin-left: 20px;\">"
-			for _, f := range files {
-				relPath, _ := filepath.Rel(uploadsDir, f)
-				baseName := filepath.Base(f)
-				filesStr += fmt.Sprintf(`<a href="/admin/files/%s" download>%s</a><br>`, html.EscapeString(relPath), html.EscapeString(baseName))
-			}
-			filesStr += "</div>"
-		} else {
-			filesStr = "<em>No attachments</em>"
-		}
-
-		// Submission card
-		subsHTML.WriteString(fmt.Sprintf(`
-			<li style="margin-bottom: 30px; padding: 20px; border: 1px solid #ccc; border-radius: 10px; background: #f8f9fa;">
-				<strong>Submission ID:</strong> %d<br>
-				<strong>Timestamp:</strong> %s<br>
-				<strong>IP Address:</strong> %s<br><br>
-				<strong>Form Data:</strong><br>
-				%s<br>
-				<strong>Files:</strong><br>
-				%s
-			</li><hr style="border: 1px dashed #ddd;">
-		`, subID,
-			timestamp.Format("2006-01-02 15:04:05"),
-			ip,
-			dataStr,
-			filesStr))
+		rows.Scan(&id, &ts, &ip)
+		html += fmt.Sprintf("<p>✓ Submission ID %d | %s | IP: %s</p>", id, ts, ip)
 	}
 
-	subsHTML.WriteString("</ul>")
-
-	if submissionCount == 0 {
-		subsHTML.WriteString("<p style=\"font-style: italic; color: #666;\">No submissions yet for this form.</p>")
-	}
-
-	subsHTML.WriteString(fmt.Sprintf(`<br><a href="/admin/" style="font-size: 18px;">← Back to Forms List</a>`))
-
-	htmlResponse := fmt.Sprintf(`
-		<!DOCTYPE html>
-		<html>
-		<head>
-			<title>Submissions - Form %d</title>
-			<style>
-				body { font-family: Arial, sans-serif; padding: 20px; background: #f0f2f5; }
-				a { color: #007bff; text-decoration: none; }
-				a:hover { text-decoration: underline; }
-			</style>
-		</head>
-		<body>
-			%s
-		</body>
-		</html>
-	`, formID, subsHTML.String())
+	html += `<br><a href="/admin/">← Back to Forms List</a>`
 
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(htmlResponse))
+	w.Write([]byte(html))
 }
 
 // serveFileHandler serves files from uploads dir (protected)

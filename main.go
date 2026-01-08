@@ -381,32 +381,42 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 		var subID int
 		var dataJSON []byte
 		var filesJSON sql.NullString
-		var timestamp time.Time
+		var timestampRaw interface{} // Flexible type to accept anything
 		var ip string
 
-		if err := rows.Scan(&subID, &dataJSON, &filesJSON, &timestamp, &ip); err != nil {
-			subsHTML.WriteString(fmt.Sprintf("<p>Error reading row: %v</p>", err))
+		if err := rows.Scan(&subID, &dataJSON, &filesJSON, &timestampRaw, &ip); err != nil {
+			subsHTML.WriteString(fmt.Sprintf("<p style=\"color:red;\">Scan error: %v</p>", err))
 			continue
 		}
 
-		// Try to parse data JSON - if fails, show raw
+		// Handle timestamp safely
+		tsStr := "Not available"
+		switch v := timestampRaw.(type) {
+		case time.Time:
+			tsStr = v.Format("2006-01-02 15:04:05")
+		case []byte:
+			tsStr = string(v)
+		case string:
+			tsStr = v
+		}
+
+		// Parse data JSON - fallback to raw if invalid
 		var data map[string]interface{}
-		dataStr := "<em>Invalid/malformed form data (raw below):</em><br><pre>" + html.EscapeString(string(dataJSON)) + "</pre>"
+		dataStr := "<pre>" + html.EscapeString(string(dataJSON)) + "</pre>"
 		if json.Unmarshal(dataJSON, &data) == nil {
 			dataStr = ""
-			for key, value := range data {
-				valStr := fmt.Sprintf("%v", value)
-				dataStr += fmt.Sprintf("<strong>%s:</strong> %s<br>", html.EscapeString(key), html.EscapeString(valStr))
+			for k, v := range data {
+				dataStr += fmt.Sprintf("<strong>%s:</strong> %s<br>", html.EscapeString(k), html.EscapeString(fmt.Sprint(v)))
 			}
 		}
 
-		// Files
+		// Parse files
 		var files []string
 		if filesJSON.Valid {
 			json.Unmarshal([]byte(filesJSON.String), &files)
 		}
 
-		filesStr := "<em>No files</em>"
+		filesStr := "<em>No files uploaded</em>"
 		if len(files) > 0 {
 			filesStr = ""
 			for _, f := range files {
@@ -416,33 +426,41 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		ts := timestamp.Format("2006-01-02 15:04:05")
-		if timestamp.IsZero() {
-			ts = "Not recorded"
-		}
-
 		subsHTML.WriteString(fmt.Sprintf(`
-			<div style="background:#fff;padding:20px;margin:20px 0;border:1px solid #ddd;border-radius:8px;">
+			<div style="background:#fff;padding:20px;margin:20px 0;border:1px solid #e0e0e0;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.1);">
 				<h3>Submission #%d</h3>
-				<p><strong>Time:</strong> %s<br><strong>IP:</strong> %s</p>
-				<h4>Data:</h4>
-				<div style="margin-left:20px;">%s</div>
-				<h4>Files:</h4>
+				<p><strong>Timestamp:</strong> %s<br>
+				<strong>IP Address:</strong> %s</p>
+				<h4>Form Data:</h4>
+				<div style="margin-left:20px;line-height:1.8;">%s</div>
+				<h4>Attachments:</h4>
 				<div style="margin-left:20px;">%s</div>
 			</div>
-		`, subID, ts, html.EscapeString(ip), dataStr, filesStr))
+		`, subID, tsStr, html.EscapeString(ip), dataStr, filesStr))
 	}
 
 	if submissionCount == 0 {
-		subsHTML.WriteString("<p><em>No submissions found.</em></p>")
+		subsHTML.WriteString("<p><em>No submissions found for this form.</em></p>")
 	}
 
-	subsHTML.WriteString(`<p><a href="/admin/">← Back to Forms List</a></p>`)
+	subsHTML.WriteString(`<p><a href="/admin/" style="font-size:18px;color:#0066cc;">← Back to Forms List</a></p>`)
 
-	fullHTML := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Submissions</title></head><body style="font-family:Arial;background:#f9f9f9;padding:20px;">%s</body></html>`, subsHTML.String())
+	finalHTML := fmt.Sprintf(`
+		<!DOCTYPE html>
+		<html>
+		<head>
+			<meta charset="UTF-8">
+			<title>Submissions - %s</title>
+			<style>
+				body { font-family: Arial, sans-serif; background:#f7f7f7; color:#333; padding:20px; }
+			</style>
+		</head>
+		<body>%s</body>
+		</html>
+	`, html.EscapeString(formName), subsHTML.String())
 
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(fullHTML))
+	w.Write([]byte(finalHTML))
 }
 
 // serveFileHandler serves files from uploads dir (protected)

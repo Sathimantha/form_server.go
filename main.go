@@ -354,6 +354,13 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional: Get form name for better title
+	var formName string
+	err = db.QueryRow("SELECT form_name FROM forms WHERE form_id = ?", formID).Scan(&formName)
+	if err != nil {
+		formName = "Unknown Form"
+	}
+
 	rows, err := db.Query(`
 		SELECT submission_id, data, files, timestamp, ip_address
 		FROM submissions WHERE form_id = ? ORDER BY timestamp DESC
@@ -366,55 +373,100 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	var subsHTML strings.Builder
-	subsHTML.WriteString("<ul>")
+	subsHTML.WriteString(fmt.Sprintf("<h1>Submissions for Form %d: %s</h1>", formID, html.EscapeString(formName)))
+	subsHTML.WriteString("<ul style=\"list-style: none; padding: 0;\">")
+
+	submissionCount := 0
 	for rows.Next() {
+		submissionCount++
+
 		var subID int
 		var dataJSON, filesJSON []byte
 		var timestamp time.Time
 		var ip string
+
 		if err := rows.Scan(&subID, &dataJSON, &filesJSON, &timestamp, &ip); err != nil {
-			continue
+			continue // Skip bad rows
 		}
 
+		// Unmarshal form data
 		var data map[string]interface{}
-		json.Unmarshal(dataJSON, &data)
+		if err := json.Unmarshal(dataJSON, &data); err != nil {
+			data = map[string]interface{}{"raw_data_error": string(dataJSON)}
+		}
+
+		// Unmarshal files
 		var files []string
-		json.Unmarshal(filesJSON, &files)
-
-		dataStr := ""
-		for k, v := range data {
-			dataStr += fmt.Sprintf("%s: %s<br>", html.EscapeString(k), html.EscapeString(fmt.Sprint(v)))
+		if filesJSON != nil && len(filesJSON) > 0 {
+			if err := json.Unmarshal(filesJSON, &files); err != nil {
+				files = nil
+			}
 		}
 
+		// Render form data
+		dataStr := "<div style=\"margin-left: 20px;\">"
+		for key, value := range data {
+			valStr := fmt.Sprintf("%v", value)
+			dataStr += fmt.Sprintf("<strong>%s:</strong> %s<br>", html.EscapeString(key), html.EscapeString(valStr))
+		}
+		dataStr += "</div>"
+
+		// Render attachments
 		filesStr := ""
-		for _, f := range files {
-			relPath, _ := filepath.Rel(uploadsDir, f) // Relative path for serving
-			filesStr += fmt.Sprintf(`<a href="/admin/files/%s" download>Download %s</a><br>`, relPath, filepath.Base(f))
+		if len(files) > 0 {
+			filesStr = "<strong>Attachments:</strong><br><div style=\"margin-left: 20px;\">"
+			for _, f := range files {
+				relPath, _ := filepath.Rel(uploadsDir, f)
+				baseName := filepath.Base(f)
+				filesStr += fmt.Sprintf(`<a href="/admin/files/%s" download>%s</a><br>`, html.EscapeString(relPath), html.EscapeString(baseName))
+			}
+			filesStr += "</div>"
+		} else {
+			filesStr = "<em>No attachments</em>"
 		}
 
+		// Submission card
 		subsHTML.WriteString(fmt.Sprintf(`
-			<li>
-				<strong>Submission %d</strong><br>
-				Timestamp: %s<br>
-				IP: %s<br>
-				Data:<br>%s
-				Files:<br>%s
-			</li>
-		`, subID, timestamp, ip, dataStr, filesStr))
+			<li style="margin-bottom: 30px; padding: 20px; border: 1px solid #ccc; border-radius: 10px; background: #f8f9fa;">
+				<strong>Submission ID:</strong> %d<br>
+				<strong>Timestamp:</strong> %s<br>
+				<strong>IP Address:</strong> %s<br><br>
+				<strong>Form Data:</strong><br>
+				%s<br>
+				<strong>Files:</strong><br>
+				%s
+			</li><hr style="border: 1px dashed #ddd;">
+		`, subID,
+			timestamp.Format("2006-01-02 15:04:05"),
+			ip,
+			dataStr,
+			filesStr))
 	}
+
 	subsHTML.WriteString("</ul>")
+
+	if submissionCount == 0 {
+		subsHTML.WriteString("<p style=\"font-style: italic; color: #666;\">No submissions yet for this form.</p>")
+	}
+
+	subsHTML.WriteString(fmt.Sprintf(`<br><a href="/admin/" style="font-size: 18px;">← Back to Forms List</a>`))
 
 	htmlResponse := fmt.Sprintf(`
 		<!DOCTYPE html>
 		<html>
-		<head><title>Submissions for Form %d</title></head>
+		<head>
+			<title>Submissions - Form %d</title>
+			<style>
+				body { font-family: Arial, sans-serif; padding: 20px; background: #f0f2f5; }
+				a { color: #007bff; text-decoration: none; }
+				a:hover { text-decoration: underline; }
+			</style>
+		</head>
 		<body>
-			<h1>Submissions for Form %d</h1>
 			%s
-			<a href="/admin">Back to Forms</a>
 		</body>
 		</html>
-	`, formID, formID, subsHTML.String())
+	`, formID, subsHTML.String())
 
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(htmlResponse))

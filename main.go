@@ -21,9 +21,10 @@ import (
 
 var db *sql.DB
 var adminPassword string
-var uploadsDir = "./uploads" // Directory to save files, relative to the binary
+var uploadsDir = "./uploads"  // Directory to save files, relative to the binary
+var enableAdminDashboard bool // Controls whether the admin interface is served
 
-// logError inserts an entry into the errors table (reusing from reference)
+// logError inserts an entry into the errors table
 func logError(errorType, remark string) {
 	london, err := time.LoadLocation("Europe/London")
 	if err != nil {
@@ -56,6 +57,15 @@ func main() {
 	dbPort := os.Getenv("DB_PORT")
 	dbName := os.Getenv("DB_NAME")
 	adminPassword = os.Getenv("ADMIN_PASSWORD")
+
+	// Read admin dashboard toggle from .env (default: true)
+	enableAdminDashboardStr := os.Getenv("ENABLE_ADMIN_DASHBOARD")
+	if enableAdminDashboardStr == "" {
+		enableAdminDashboard = true // default to enabled
+	} else {
+		enableAdminDashboard, _ = strconv.ParseBool(enableAdminDashboardStr)
+	}
+
 	if adminPassword == "" {
 		logError("CONFIG_ERROR", "ADMIN_PASSWORD not defined in .env")
 		os.Exit(1)
@@ -73,31 +83,38 @@ func main() {
 	createTables()
 
 	// Ensure uploads directory exists
-	if err := os.MkdirAll(uploadsDir, 0755); err != nil { // drwxr-xr-x, no exec for others
+	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		logError("STARTUP_ERROR", fmt.Sprintf("Failed to create uploads dir: %v", err))
 		os.Exit(1)
 	}
 
 	r := mux.NewRouter()
 
-	// Submission handler
+	// Submission handler (always available)
 	r.HandleFunc("/submit", submitHandler).Methods("POST")
 
-	// Admin interface routes (protected)
-	// Admin interface routes (protected)
-	adminRouter := r.PathPrefix("/admin").Subrouter()
-	adminRouter.Use(basicAuthMiddleware)
-	adminRouter.HandleFunc("/", adminHomeHandler).Methods("GET") // Matches /admin/
-	adminRouter.HandleFunc("/create-form", createFormHandler).Methods("POST")
-	adminRouter.HandleFunc("/forms/{form_id}", viewSubmissionsHandler).Methods("GET")
+	// Only register admin routes if enabled
+	if enableAdminDashboard {
+		// Admin interface routes (protected)
+		adminRouter := r.PathPrefix("/admin").Subrouter()
+		adminRouter.Use(basicAuthMiddleware)
+		adminRouter.HandleFunc("/", adminHomeHandler).Methods("GET") // Matches /admin/
+		adminRouter.HandleFunc("/create-form", createFormHandler).Methods("POST")
+		adminRouter.HandleFunc("/forms/{form_id}", viewSubmissionsHandler).Methods("GET")
 
-	// File serving (protected under /admin/files/)
-	adminRouter.HandleFunc("/files/{path:.*}", serveFileHandler).Methods("GET")
+		// File serving (protected under /admin/files/)
+		adminRouter.HandleFunc("/files/{path:.*}", serveFileHandler).Methods("GET")
 
-	// Add this: Explicit handler for /admin (without trailing slash) - redirects to /admin/
-	r.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
-	}).Methods("GET")
+		// Redirect /admin (no trailing slash) → /admin/
+		r.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
+		}).Methods("GET")
+	} else {
+		// Optional: return 404 or 403 on any /admin* request when disabled
+		r.PathPrefix("/admin").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "Admin dashboard is disabled", http.StatusForbidden)
+		})
+	}
 
 	// CORS configuration: Allow only from *.peaceandhumanity.org
 	corsHandler := handlers.CORS(
@@ -116,6 +133,8 @@ func main() {
 		logError("CONFIG_ERROR", "CERT_FILE or KEY_FILE not defined in .env")
 		os.Exit(1)
 	}
+
+	logError("SERVER_START", fmt.Sprintf("Server starting on :5003 (admin dashboard: %t)", enableAdminDashboard))
 
 	err = http.ListenAndServeTLS(":5003", certFile, keyFile, nil)
 	if err != nil {
@@ -143,7 +162,7 @@ func createTables() {
 			submission_id INT AUTO_INCREMENT PRIMARY KEY,
 			form_id INT NOT NULL,
 			data JSON NOT NULL,
-			files JSON,  -- Array of file paths
+			files JSON,
 			timestamp DATETIME NOT NULL,
 			ip_address VARCHAR(45) NOT NULL,
 			FOREIGN KEY (form_id) REFERENCES forms(form_id)
@@ -151,6 +170,19 @@ func createTables() {
 	`)
 	if err != nil {
 		logError("DB_SETUP_ERROR", fmt.Sprintf("Failed to create submissions table: %v", err))
+	}
+
+	// Optional errors table (used by logError)
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS errors (
+			id INT AUTO_INCREMENT PRIMARY KEY,
+			timestamp DATETIME NOT NULL,
+			error_type VARCHAR(100) NOT NULL,
+			remark TEXT
+		)
+	`)
+	if err != nil {
+		// Silent fail
 	}
 }
 
@@ -202,7 +234,7 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Handle files
 	var filePaths []string
-	submissionDir := filepath.Join(uploadsDir, fmt.Sprintf("form_%d", formID), fmt.Sprintf("submission_%d", time.Now().UnixNano())) // Unique dir per submission
+	submissionDir := filepath.Join(uploadsDir, fmt.Sprintf("form_%d", formID), fmt.Sprintf("submission_%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(submissionDir, 0755); err != nil {
 		logError("SUBMIT_MKDIR_ERROR", fmt.Sprintf("Failed to create submission dir: %v", err))
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -219,8 +251,8 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 			defer file.Close()
 
 			// Sanitize filename
-			filename := strings.ReplaceAll(fileHeader.Filename, "..", "") // Prevent path traversal
-			filename = strings.ReplaceAll(filename, "/", "")              // No subdirs
+			filename := strings.ReplaceAll(fileHeader.Filename, "..", "")
+			filename = strings.ReplaceAll(filename, "/", "")
 			dstPath := filepath.Join(submissionDir, filename)
 
 			dst, err := os.Create(dstPath)
@@ -235,7 +267,6 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			// Set permissions: rw-r--r-- (no exec)
 			if err := os.Chmod(dstPath, 0644); err != nil {
 				logError("SUBMIT_CHMOD_ERROR", fmt.Sprintf("Failed to set file perms: %v", err))
 			}
@@ -244,7 +275,7 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filesJSON, _ := json.Marshal(filePaths) // Ignore err, empty if no files
+	filesJSON, _ := json.Marshal(filePaths)
 
 	// Insert submission
 	timestamp := time.Now()
@@ -381,7 +412,7 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 		var subID int
 		var dataJSON []byte
 		var filesJSON sql.NullString
-		var timestampRaw interface{} // Flexible type to accept anything
+		var timestampRaw interface{}
 		var ip string
 
 		if err := rows.Scan(&subID, &dataJSON, &filesJSON, &timestampRaw, &ip); err != nil {
@@ -400,7 +431,7 @@ func viewSubmissionsHandler(w http.ResponseWriter, r *http.Request) {
 			tsStr = v
 		}
 
-		// Parse data JSON - fallback to raw if invalid
+		// Parse data JSON
 		var data map[string]interface{}
 		dataStr := "<pre>" + html.EscapeString(string(dataJSON)) + "</pre>"
 		if json.Unmarshal(dataJSON, &data) == nil {
